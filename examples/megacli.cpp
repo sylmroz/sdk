@@ -23,6 +23,7 @@
 #include "megacli.h"
 #include <fstream>
 #include <bitset>
+#include <optional>
 #include "mega/testhooks.h"
 
 #if defined(_WIN32) && defined(_DEBUG)
@@ -83,6 +84,22 @@ using std::ofstream;
 using std::setw;
 using std::hex;
 using std::dec;
+
+struct HumanReadable {
+    std::uintmax_t size{};
+
+    template <typename Os> friend Os& operator<< (Os& os, HumanReadable hr)
+    {
+        int i{};
+        auto mantissa = hr.size/1.0;
+        for (; mantissa >= 1024.; ++i) {
+            mantissa /= 1024.;
+        }
+        mantissa = std::ceil(mantissa * 10.) / 10.;
+        os << mantissa << "BKMGTPE"[i];
+        return i == 0 ? os : os << "B (" << hr.size << ')';
+    }
+};
 
 MegaClient* client;
 MegaClient* clientFolder;
@@ -2070,23 +2087,33 @@ static void dumptree(Node* n, bool recurse, int depth, const char* title, ofstre
 }
 
 #ifdef USE_FILESYSTEM
-static void local_dumptree(const fs::path& de, int recurse, int depth = 0)
+static void local_dumptree(const fs::path& de, bool details, ofstream* file, int recurse, int depth = 0)
 {
+    std::ostream& out = file ? *file : cout;
     if (depth)
     {
         for (int i = depth; i--; )
         {
-            cout << "\t";
+            out << "\t";
         }
 
-        cout << de.filename().u8string() << " (";
+        out << de.filename().u8string() << " (";
 
         if (fs::is_directory(de))
         {
-            cout << "folder";
+            out << "folder";
+        }
+        else
+        {
+            if (details)
+            {
+                using namespace std::chrono;
+                auto write_time = duration_cast<seconds>(fs::last_write_time(de).time_since_epoch()).count();
+                out <<"file size : " << HumanReadable{fs::file_size(de)} << "; last edit: " << std::asctime(std::localtime(&write_time));
+            }
         }
 
-        cout << ")" << endl;
+        out << ")" << endl;
 
         if (!recurse)
         {
@@ -2098,7 +2125,7 @@ static void local_dumptree(const fs::path& de, int recurse, int depth = 0)
     {
         for (auto i = fs::directory_iterator(de); i != fs::directory_iterator(); ++i)
         {
-            local_dumptree(*i, recurse, depth + 1);
+            local_dumptree(*i, details, file, recurse, depth + 1);
         }
     }
 }
@@ -4112,7 +4139,7 @@ autocomplete::ACN autocompleteSyntax()
     p->Add(exec_lcd, sequence(text("lcd"), opt(localFSFolder())));
     p->Add(exec_llockfile, sequence(text("llockfile"), opt(flag("-read")), opt(flag("-write")), opt(flag("-unlock")), localFSFile()));
 #ifdef USE_FILESYSTEM
-    p->Add(exec_lls, sequence(text("lls"), opt(flag("-R")), opt(localFSFolder())));
+    p->Add(exec_lls, sequence(text("lls"), opt(flag("-R")), opt(sequence(flag("-tofile"), param("filename"))), opt(flag("-details")), opt(localFSFolder())));
     p->Add(exec_lpwd, sequence(text("lpwd")));
     p->Add(exec_lmkdir, sequence(text("lmkdir"), localFSFolder()));
 #endif
@@ -5671,6 +5698,17 @@ void exec_llockfile(autocomplete::ACState& s)
 void exec_lls(autocomplete::ACState& s)
 {
     bool recursive = s.extractflag("-R");
+    bool details = s.extractflag("-details");
+
+    string toFileName;
+    bool toFileFlag = s.extractflagparam("-tofile", toFileName);
+
+    ofstream toFile;
+    if (toFileFlag)
+    {
+        toFile.open(toFileName);
+    }
+
     fs::path ls_folder = s.words.size() > 1 ? fs::u8path(s.words[1].s) : fs::current_path();
     std::error_code ec;
     auto status = fs::status(ls_folder, ec);
@@ -5685,7 +5723,8 @@ void exec_lls(autocomplete::ACState& s)
     }
     else
     {
-        local_dumptree(ls_folder, recursive);
+        std::ofstream* out = toFileFlag ? &toFile : nullptr;
+        local_dumptree(ls_folder, details, out, recursive);
     }
 }
 #endif
